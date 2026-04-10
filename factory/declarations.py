@@ -408,6 +408,10 @@ class SubFactory(BaseDeclaration):
             step,
         )
         force_sequence = step.sequence if self.FORCE_SEQUENCE else None
+        # If called from an async build context, use arecurse to return
+        # a coroutine that aresolve() will await.
+        if getattr(step.builder, '_async', False):
+            return step.arecurse(subfactory, extra, force_sequence=force_sequence)
         return step.recurse(subfactory, extra, force_sequence=force_sequence)
 
 
@@ -686,6 +690,9 @@ class RelatedFactory(PostGenerationDeclaration):
             factory.__name__,
             utils.log_pprint((step,), passed_kwargs),
         )
+        # In async build context, return a coroutine so abuild() can await it.
+        if getattr(step.builder, '_async', False):
+            return step.arecurse(factory, passed_kwargs)
         return step.recurse(factory, passed_kwargs)
 
 
