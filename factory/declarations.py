@@ -149,6 +149,29 @@ def deepgetattr(obj, name, default=_UNSPECIFIED):
             return default
 
 
+async def adeepgetattr(obj, name, default=_UNSPECIFIED):
+    """Async variant of deepgetattr that awaits awaitables at each step."""
+    import inspect
+
+    try:
+        if '.' in name:
+            attr, subname = name.split('.', 1)
+            value = getattr(obj, attr)
+            if inspect.isawaitable(value):
+                value = await value
+            return await adeepgetattr(value, subname, default)
+        else:
+            value = getattr(obj, name)
+            if inspect.isawaitable(value):
+                value = await value
+            return value
+    except AttributeError:
+        if default is _UNSPECIFIED:
+            raise
+        else:
+            return default
+
+
 class SelfAttribute(BaseDeclaration):
     """Specific BaseDeclaration copying values from other fields.
 
@@ -179,6 +202,8 @@ class SelfAttribute(BaseDeclaration):
             target = instance
 
         logger.debug("SelfAttribute: Picking attribute %r on %r", self.attribute_name, target)
+        if getattr(step.builder, '_async', False):
+            return adeepgetattr(target, self.attribute_name, self.default)
         return deepgetattr(target, self.attribute_name, self.default)
 
     def __repr__(self):
