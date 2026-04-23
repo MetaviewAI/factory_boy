@@ -159,11 +159,18 @@ async def adeepgetattr(obj, name, default=_UNSPECIFIED):
             value = getattr(obj, attr)
             if inspect.isawaitable(value):
                 value = await value
+                # Store resolved value back into the Resolver cache so that
+                # subsequent accesses (e.g. from aresolve) see the real object
+                # instead of the consumed coroutine.
+                if hasattr(obj, '_force_value'):
+                    obj._force_value(attr, value)
             return await adeepgetattr(value, subname, default)
         else:
             value = getattr(obj, name)
             if inspect.isawaitable(value):
                 value = await value
+                if hasattr(obj, '_force_value'):
+                    obj._force_value(name, value)
             return value
     except AttributeError:
         if default is _UNSPECIFIED:
