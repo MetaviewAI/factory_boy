@@ -326,6 +326,35 @@ class FactoryOptions:
             results=results,
         )
 
+    async def ainstantiate(self, step, args, kwargs):
+        """Async variant of instantiate — awaits async _create."""
+        import inspect
+
+        model = self.get_model_class()
+
+        if step.builder.strategy == enums.BUILD_STRATEGY:
+            return self.factory._build(model, *args, **kwargs)
+        elif step.builder.strategy == enums.CREATE_STRATEGY:
+            result = self.factory._create(model, *args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        else:
+            assert step.builder.strategy == enums.STUB_STRATEGY
+            return StubObject(**kwargs)
+
+    async def ause_postgeneration_results(self, step, instance, results):
+        """Async variant of use_postgeneration_results."""
+        import inspect
+
+        result = self.factory._after_postgeneration(
+            instance,
+            create=step.builder.strategy == enums.CREATE_STRATEGY,
+            results=results,
+        )
+        if inspect.isawaitable(result):
+            await result
+
     def _is_declaration(self, name, value):
         """Determines if a class attribute is a field value declaration.
 
@@ -463,6 +492,18 @@ class BaseFactory:
 
         step = builder.StepBuilder(cls._meta, params, strategy)
         return step.build()
+
+    @classmethod
+    async def _agenerate(cls, strategy, params):
+        """Async variant of _generate — builds the object graph asynchronously."""
+        if cls._meta.abstract:
+            raise errors.FactoryError(
+                "Cannot generate instances of abstract factory %(f)s; "
+                "Ensure %(f)s.Meta.model is set and %(f)s.Meta.abstract "
+                "is either not set or False." % dict(f=cls.__name__))
+
+        step = builder.StepBuilder(cls._meta, params, strategy)
+        return await step.abuild()
 
     @classmethod
     def _after_postgeneration(cls, instance, create, results=None):

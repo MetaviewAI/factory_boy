@@ -1,6 +1,7 @@
 """Build factory instances."""
 
 import collections
+import inspect
 
 from . import declarations, enums, errors, utils
 
@@ -202,6 +203,27 @@ class BuildStep:
         for field_name in declarations:
             self.attributes[field_name] = getattr(self.stub, field_name)
 
+    async def aresolve(self, declarations):
+        """Async variant of resolve.
+
+        Evaluates declarations eagerly. For declarations whose evaluate_pre
+        returns a coroutine (e.g. async SubFactory), the result is awaited.
+        """
+        self.stub = Resolver(
+            declarations=declarations,
+            step=self,
+            sequence=self.sequence,
+        )
+
+        for field_name in declarations:
+            value = getattr(self.stub, field_name)
+            if inspect.isawaitable(value):
+                value = await value
+                # Store resolved value back so subsequent declarations
+                # that reference this field see the real object, not a coroutine.
+                self.stub._force_value(field_name, value)
+            self.attributes[field_name] = value
+
     @property
     def chain(self):
         if self.parent_step:
@@ -218,6 +240,16 @@ class BuildStep:
                 % (self, factory))
         builder = self.builder.recurse(factory._meta, declarations)
         return builder.build(parent_step=self, force_sequence=force_sequence)
+
+    async def arecurse(self, factory, declarations, force_sequence=None):
+        """Async variant of recurse — builds a sub-factory asynchronously."""
+        from . import base
+        if not issubclass(factory, base.BaseFactory):
+            raise errors.AssociatedClassError(
+                "%r: Attempting to recursing into a non-factory object %r"
+                % (self, factory))
+        builder = self.builder.recurse(factory._meta, declarations)
+        return await builder.abuild(parent_step=self, force_sequence=force_sequence)
 
     def __repr__(self):
         return f"<BuildStep for {self.builder!r}>"
@@ -237,6 +269,7 @@ class StepBuilder:
         self.strategy = strategy
         self.extras = extras
         self.force_init_sequence = extras.pop('__sequence', None)
+        self._async = False
 
     def build(self, parent_step=None, force_sequence=None):
         """Build a factory instance."""
@@ -284,6 +317,61 @@ class StepBuilder:
         )
         return instance
 
+    async def abuild(self, parent_step=None, force_sequence=None):
+        """Build a factory instance asynchronously.
+
+        Same as build() but awaits async _create, SubFactory, and
+        PostGeneration calls.
+        """
+        self._async = True
+        pre, post = parse_declarations(
+            self.extras,
+            base_pre=self.factory_meta.pre_declarations,
+            base_post=self.factory_meta.post_declarations,
+        )
+
+        if force_sequence is not None:
+            sequence = force_sequence
+        elif self.force_init_sequence is not None:
+            sequence = self.force_init_sequence
+        else:
+            sequence = self.factory_meta.next_sequence()
+
+        step = BuildStep(
+            builder=self,
+            sequence=sequence,
+            parent_step=parent_step,
+        )
+        await step.aresolve(pre)
+
+        args, kwargs = self.factory_meta.prepare_arguments(step.attributes)
+
+        instance = await self.factory_meta.ainstantiate(
+            step=step,
+            args=args,
+            kwargs=kwargs,
+        )
+
+        postgen_results = {}
+        for declaration_name in post.sorted():
+            declaration = post[declaration_name]
+            result = declaration.declaration.evaluate_post(
+                instance=instance,
+                step=step,
+                overrides=declaration.context,
+            )
+            # PostGeneration/RelatedFactory may return a coroutine
+            if inspect.isawaitable(result):
+                result = await result
+            postgen_results[declaration_name] = result
+
+        await self.factory_meta.ause_postgeneration_results(
+            instance=instance,
+            step=step,
+            results=postgen_results,
+        )
+        return instance
+
     def recurse(self, factory_meta, extras):
         """Recurse into a sub-factory call."""
         return self.__class__(factory_meta, extras, strategy=self.strategy)
@@ -319,6 +407,10 @@ class Resolver:
         self.__pending = []
 
         self.__initialized = True
+
+    def _force_value(self, name, value):
+        """Force-set a resolved value (used by async resolution after awaiting)."""
+        self.__values[name] = value
 
     @property
     def factory_parent(self):
